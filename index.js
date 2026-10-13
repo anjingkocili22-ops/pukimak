@@ -34,11 +34,14 @@ const rl = readline.createInterface({input:process.stdin,output:process.stdout})
 const ask = (q) => new Promise((r) => rl.question(q,r));
 const log = (s) => console.log(s);
 
-// Isi text field dengan fallback selector
 async function fillField(page, sels, val, label) {
   for (const s of sels) {
     try {
-      await page.fill(s, val, { timeout: 3000 });
+      const el = await page.$(s);
+      if (!el) continue;
+      if (!(await el.isVisible())) continue;
+      await el.scrollIntoViewIfNeeded();
+      await el.fill(val, { timeout: 3000 });
       log('  [text] ' + (label||s) + ' = ' + val);
       return true;
     } catch(e){}
@@ -47,9 +50,7 @@ async function fillField(page, sels, val, label) {
   return false;
 }
 
-// Klik pill/button berdasarkan teks (buat Gender, Language, Type, Course, dll)
 async function clickPill(page, text) {
-  // Prioritas: exact match di button/label/div yang mengandung teks
   const sels = [
     'button:has-text("' + text + '")',
     'label:has-text("' + text + '")',
@@ -72,9 +73,7 @@ async function clickPill(page, text) {
   return false;
 }
 
-// Checkbox berdasarkan teks label
 async function clickCheckbox(page, text) {
-  // Coba cari input checkbox yang berdekatan dengan label text
   try {
     const handle = await page.evaluateHandle((t) => {
       const labels = Array.from(document.querySelectorAll('label'));
@@ -82,7 +81,6 @@ async function clickCheckbox(page, text) {
         if (l.innerText.trim().includes(t)) {
           const inp = l.querySelector('input[type="checkbox"]');
           if (inp) return inp;
-          // kalau label punya atribut for
           if (l.htmlFor) {
             const el = document.getElementById(l.htmlFor);
             if (el) return el;
@@ -103,18 +101,16 @@ async function clickCheckbox(page, text) {
   return false;
 }
 
-// Autocomplete: ketik, tunggu dropdown, klik opsi yang cocok
 async function autocomplete(page, sel, query, matchFirst) {
   try {
     const inp = await page.$(sel);
-    if (!inp) { log('  [!] field autocomplete tidak ada: ' + sel); return false; }
+    if (!inp) { log('  [!] autocomplete tidak ada: ' + sel); return false; }
     await inp.scrollIntoViewIfNeeded();
     await inp.click();
     await inp.fill('');
     await inp.type(query, { delay: 80 });
-    await page.waitForTimeout(2000); // tunggu dropdown muncul
+    await page.waitForTimeout(2000);
 
-    // Cari opsi dropdown yang visible
     const options = await page.$$('li, [role="option"], .pac-item, [class*="suggestion"], [class*="option"]');
     let clicked = false;
     for (const opt of options) {
@@ -131,7 +127,6 @@ async function autocomplete(page, sel, query, matchFirst) {
       } catch(e){}
     }
     if (!clicked) {
-      // fallback: Enter
       await page.keyboard.press('ArrowDown');
       await page.waitForTimeout(300);
       await page.keyboard.press('Enter');
@@ -144,7 +139,6 @@ async function autocomplete(page, sel, query, matchFirst) {
   }
 }
 
-// Klik Next/Submit berdasarkan teks
 async function clickNext(page, texts) {
   for (const t of texts) {
     try {
@@ -213,29 +207,35 @@ async function clickNext(page, texts) {
   });
   const page = await ctx.newPage();
 
-  // ================= STEP 1: Halaman awal -> Continue with Email =================
+  // ================= STEP 1: Halaman awal =================
   log('[*] Buka halaman awal...');
-  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(4000);
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(5000);
   await page.screenshot({ path: 's1-home.png' });
 
   log('[*] Klik "Continue with Email"...');
   await clickNext(page, ['Continue with Email', 'Login', 'Sign up']);
-  await page.waitForTimeout(4000);
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(5000);
   await page.screenshot({ path: 's2-signup.png' });
 
   // ================= STEP 2: Sign up form =================
   log('[*] Isi form sign up...');
-  await fillField(page, ['input[name="email"]','input[type="email"]'], email, 'email');
-  await fillField(page, ['input[name="password"]','input[type="password"]'], password, 'password');
-  await fillField(page, ['input[name="first_name"]','input[placeholder*="John" i]'], first, 'first_name');
-  await fillField(page, ['input[name="last_name"]','input[placeholder*="Doe" i]'], last, 'last_name');
+  await fillField(page, ['#email','#modal_email'], email, 'email');
+  await fillField(page, ['#password','#modal_password'], password, 'password');
+  await fillField(page, ['#first_name'], first, 'first_name');
+  await fillField(page, ['#last_name'], last, 'last_name');
 
   await page.screenshot({ path: 's3-signup-filled.png' });
 
   log('[*] Klik "Sign up"...');
-  await clickNext(page, ['Sign up', 'Sign Up', 'Register']);
-  await page.waitForTimeout(6000);
+  try {
+    await page.click('#registration_submit', { timeout: 5000 });
+    log('  [next] #registration_submit');
+  } catch(e) {
+    await clickNext(page, ['Sign up', 'Sign Up', 'Register']);
+  }
+  await page.waitForTimeout(7000);
   await page.screenshot({ path: 's4-after-signup.png' });
 
   // ================= STEP 3: OTP =================
@@ -243,7 +243,6 @@ async function clickNext(page, texts) {
   const otp = (await ask('Masukkan OTP: ')).trim();
 
   if (otp) {
-    // Isi semua input kosong yang visible (OTP biasanya 4-6 kotak)
     const filled = await page.evaluate((code) => {
       const inputs = Array.from(document.querySelectorAll('input'));
       let count = 0;
@@ -263,7 +262,6 @@ async function clickNext(page, texts) {
     }, otp);
     log('  [otp] diisi ke ' + filled + ' field');
 
-    // kalau cuma 1 field, isi full OTP
     if (filled <= 1) {
       try {
         const inp = await page.$('input[type="tel"], input[inputmode="numeric"], input[name*="otp" i]');
@@ -281,42 +279,32 @@ async function clickNext(page, texts) {
   log('[*] Form onboarding 1...');
   await page.waitForTimeout(3000);
 
-  // Phone number
   await fillField(page, [
     'input[name="mobile"]',
     'input[name="phone"]',
     'input[placeholder*="Mobile" i]',
   ], data.phone, 'phone');
 
-  // City (autocomplete)
   await autocomplete(page,
     'input[placeholder*="location" i], input[placeholder*="city" i], input[name="city"]',
     data.city, true);
 
-  // Gender pill
   await clickPill(page, data.gender);
 
-  // Languages
   for (const l of data.langs) await clickPill(page, l);
 
-  // Type
   await clickPill(page, data.type);
-
-  // Course
   await clickPill(page, data.course);
 
-  // College (autocomplete)
   await autocomplete(page,
     'input[placeholder*="BITS" i], input[placeholder*="college" i], input[name="college"]',
     data.college, true);
 
-  // Stream
   await fillField(page, [
     'input[placeholder*="Computer Science" i]',
     'input[name="stream"]',
   ], data.stream, 'stream');
 
-  // Start year & End year (dropdown)
   try {
     const selects = await page.$$('select');
     if (selects.length >= 2) {
@@ -324,7 +312,6 @@ async function clickNext(page, texts) {
       await selects[1].selectOption(data.endYear).catch(()=>{});
       log('  [select] year');
     } else {
-      // kalau custom dropdown, klik & pilih
       await clickPill(page, data.startYear);
       await page.waitForTimeout(500);
       await clickPill(page, data.endYear);
